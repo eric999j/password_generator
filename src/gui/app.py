@@ -8,9 +8,7 @@ import ttkbootstrap as ttb
 from datetime import datetime
 
 from src.config import Config
-from src.database import PasswordRepository
-from src.services import PasswordGenerator
-from src.crypto.secure_string import SecureString
+from src.services import PasswordGenerator, PasswordService
 
 
 class PasswordGeneratorApp:
@@ -21,7 +19,7 @@ class PasswordGeneratorApp:
         self.root.title(Config.APP_NAME)
         self.root.geometry(Config.WINDOW_SIZE)
         
-        self.repo = PasswordRepository()
+        self.password_service = PasswordService()
         self._build_ui()
     
     def _build_ui(self):
@@ -51,6 +49,7 @@ class PasswordGeneratorApp:
         self.manage_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.manage_tab, text='密碼管理')
         self._build_manage_tab()
+        self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
     
     def _build_generate_tab(self):
         """生成密碼頁籤"""
@@ -154,6 +153,10 @@ class PasswordGeneratorApp:
         self.password_text.delete('1.0', 'end')
         self.password_text.insert('1.0', password)
         self._update_strength(password)
+
+    def _on_tab_changed(self, _event):
+        if self.notebook.select() == str(self.manage_tab):
+            self._refresh_list()
     
     def _on_evaluate(self):
         password = self.password_text.get('1.0', 'end-1c').strip()
@@ -182,20 +185,19 @@ class PasswordGeneratorApp:
             messagebox.showwarning('警告', '請填寫所有欄位')
             return
         
-        # 使用 SecureString 處理密碼
-        with SecureString(raw_password) as sec_pwd:
-            if self.repo.add(service, username, sec_pwd.get_value()):
-                messagebox.showinfo('成功', f'密碼已儲存: {service}')
-                self.service_entry.delete(0, 'end')
-                self.username_entry.delete(0, 'end')
-                self.password_text.delete('1.0', 'end')
-            else:
-                messagebox.showerror('錯誤', f'服務 "{service}" 已存在')
+        if self.password_service.create_password(service, username, raw_password):
+            messagebox.showinfo('成功', f'密碼已儲存: {service}')
+            self.service_entry.delete(0, 'end')
+            self.username_entry.delete(0, 'end')
+            self.password_text.delete('1.0', 'end')
+        else:
+            messagebox.showerror('錯誤', f'服務 "{service}" 已存在')
     
     def _refresh_list(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        for pwd in self.repo.get_all():
+        existing_items = self.tree.get_children()
+        if existing_items:
+            self.tree.delete(*existing_items)
+        for pwd in self.password_service.get_all_passwords():
             self.tree.insert('', 'end', iid=pwd['id'],
                              values=(pwd['service'], pwd['username'], pwd['updated_at']))
     
@@ -211,7 +213,7 @@ class PasswordGeneratorApp:
         if not service:
             return
         
-        info = self.repo.get(service)
+        info = self.password_service.get_password(service)
         if info:
             win = tk.Toplevel(self.root)
             win.title(f'查看密碼 - {service}')
@@ -241,7 +243,7 @@ class PasswordGeneratorApp:
         if not service:
             return
         
-        info = self.repo.get(service)
+        info = self.password_service.get_password(service)
         if info:
             win = tk.Toplevel(self.root)
             win.title(f'編輯密碼 - {service}')
@@ -261,7 +263,7 @@ class PasswordGeneratorApp:
                 new_user = username_entry.get().strip()
                 new_pwd = pwd_text.get('1.0', 'end-1c').strip()
                 if new_user and new_pwd:
-                    if self.repo.update(service, new_user, new_pwd):
+                    if self.password_service.update_password(service, new_user, new_pwd):
                         messagebox.showinfo('成功', '密碼已更新')
                         win.destroy()
                         self._refresh_list()
@@ -274,7 +276,7 @@ class PasswordGeneratorApp:
             return
         
         if messagebox.askyesno('確認刪除', f'確定要刪除 "{service}" 的密碼嗎？'):
-            if self.repo.delete(service):
+            if self.password_service.delete_password(service):
                 messagebox.showinfo('成功', '密碼已刪除')
                 self._refresh_list()
     
@@ -285,7 +287,7 @@ class PasswordGeneratorApp:
             initialfile=f'passwords_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
         )
         if path:
-            if self.repo.export_csv(path):
+            if self.password_service.export_csv(path):
                 messagebox.showinfo('成功', f'密碼已導出到:\n{path}')
 
     def _toggle_theme(self):
@@ -298,8 +300,6 @@ class PasswordGeneratorApp:
             # 如果當前是 darkly，則切換為 flatly；否則切換為 darkly
             new_theme = 'flatly' if current_theme == 'darkly' else 'darkly'
             
-            print(f"Theme toggle: {current_theme} -> {new_theme}")
-            
             # 應用新主題
             self.root.style.theme_use(new_theme)
             
@@ -310,7 +310,6 @@ class PasswordGeneratorApp:
             self._update_theme_button(new_theme)
             
         except Exception as e:
-            print(f"Theme toggle error: {e}")
             messagebox.showerror('錯誤', f'切換主題失敗: {str(e)}')
 
     def _update_theme_button(self, theme_name):
@@ -323,7 +322,6 @@ def run_app():
     """運行應用程式"""
     # 讀取儲存的主題，默認為 darkly
     theme = Config.get_theme()
-    print(f"Starting app with theme: {theme}")
     
     root = ttb.Window(themename=theme)
     
@@ -331,10 +329,9 @@ def run_app():
     try:
         current = root.style.theme.name
         if current != theme:
-            print(f"Theme mismatch detected! Expected {theme}, got {current}. Enforcing...")
             root.style.theme_use(theme)
-    except Exception as e:
-        print(f"Theme validation error: {e}")
+    except Exception:
+        pass
             
     try:
         PasswordGeneratorApp(root)

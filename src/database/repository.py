@@ -8,6 +8,7 @@ from datetime import datetime
 from contextlib import contextmanager
 from typing import Optional, List, Dict
 import queue
+import threading
 
 from src.config import Config
 from src.crypto import encrypt, decrypt
@@ -20,14 +21,20 @@ class SQLitePool:
         self.db_path = db_path
         self.size = size
         self.pool = queue.Queue(maxsize=size)
+        self._closed = False
+        self._lock = threading.Lock()
         for _ in range(size):
             conn = sqlite3.connect(db_path, check_same_thread=False, timeout=5.0)
             conn.execute('PRAGMA journal_mode = WAL')
             conn.execute('PRAGMA synchronous = NORMAL')
+            conn.execute('PRAGMA busy_timeout = 5000')
             self.pool.put(conn)
             
     @contextmanager
     def get_connection(self):
+        with self._lock:
+            if self._closed:
+                raise RuntimeError('資料庫連線池已關閉')
         conn = self.pool.get()
         try:
             yield conn
@@ -36,9 +43,15 @@ class SQLitePool:
             conn.rollback()
             raise
         finally:
-            self.pool.put(conn)
+            with self._lock:
+                if self._closed:
+                    conn.close()
+                else:
+                    self.pool.put(conn)
 
     def close_all(self):
+        with self._lock:
+            self._closed = True
         while not self.pool.empty():
             conn = self.pool.get()
             conn.close()
@@ -48,12 +61,14 @@ class PasswordRepository:
     """密碼資料存取"""
     
     _instance = None
-    _pool = None
+    _instance_lock = threading.Lock()
     
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._init_db()
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._init_db()
         return cls._instance
     
     def _init_db(self):
@@ -71,6 +86,7 @@ class PasswordRepository:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_passwords_updated_at ON passwords(updated_at DESC)')
     
     def _check_auth(self):
         """啟動前驗證認證狀態"""
